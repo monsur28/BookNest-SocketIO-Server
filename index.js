@@ -1,27 +1,39 @@
-// server.js
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const mongoose = require("mongoose");
 const cors = require("cors");
-require("dotenv").config(); // Load .env file
+require("dotenv").config();
 
+// Initialize Express app
 const app = express();
 const server = http.createServer(app);
+
+// Log the frontend URL for debugging
+console.log("Frontend URL:", process.env.FRONTEND_URL);
+
+// Configure Socket.IO with CORS settings
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: "*", // Use environment variable or default to localhost
     methods: ["GET", "POST"],
   },
 });
 
+// Middleware
 app.use(cors());
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+app.use(express.json()); // To parse JSON requests
 
+// MongoDB connection
+mongoose
+  .connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log("Connected to MongoDB"))
+  .catch((err) => console.log("MongoDB connection error:", err));
+
+// Message schema and model
 const messageSchema = new mongoose.Schema({
   sender: String,
   receiver: String,
@@ -31,13 +43,14 @@ const messageSchema = new mongoose.Schema({
 
 const Message = mongoose.model("Message", messageSchema);
 
-const users = {}; // Track connected users
+// Track connected users
+const users = {};
 
+// Socket.IO connection
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
   socket.on("register", (username) => {
-    console.log(`${username} has joined the chat`);
     if (!users[username]) {
       socket.username = username;
       users[username] = socket;
@@ -49,13 +62,12 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Load chat history for the current user
   socket.on("load-messages", async () => {
     const messages = await Message.find({
       $or: [{ sender: socket.username }, { receiver: socket.username }],
     })
       .sort({ timestamp: 1 })
-      .limit(50); // Load recent 50 messages
+      .limit(50);
     socket.emit("chat-history", messages);
   });
 
@@ -63,20 +75,16 @@ io.on("connection", (socket) => {
     const message = { sender: socket.username, receiver, text };
     const receiverSocket = users[receiver];
 
-    // Store message in MongoDB
     await Message.create(message);
 
-    // Emit to the receiver if online, otherwise store only
     if (receiverSocket) {
       receiverSocket.emit("message", message);
     }
 
-    // Send back to sender
     socket.emit("message", { ...message, sender: "You" });
   });
 
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
     delete users[socket.username];
     socket.broadcast.emit(
       "user-disconnected",
@@ -85,8 +93,8 @@ io.on("connection", (socket) => {
   });
 });
 
+// Server listening
 const PORT = process.env.PORT || 5000;
-
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
