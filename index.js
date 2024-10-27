@@ -5,24 +5,19 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 require("dotenv").config();
 
-// Initialize Express app
 const app = express();
 const server = http.createServer(app);
 
-// Log the frontend URL for debugging
-console.log("Frontend URL:", process.env.FRONTEND_URL);
-
-// Configure Socket.IO with CORS settings
 const io = socketIo(server, {
   cors: {
-    origin: "*", // Use environment variable or default to localhost
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
 // Middleware
 app.use(cors());
-app.use(express.json()); // To parse JSON requests
+app.use(express.json());
 
 // MongoDB connection
 mongoose
@@ -43,25 +38,46 @@ const messageSchema = new mongoose.Schema({
 
 const Message = mongoose.model("Message", messageSchema);
 
-// Track connected users
-const users = {};
+// Track connected users and agents
+const users = {}; // { username: socketId }
+const agents = {}; // { agentName: socketId }
+const agentsList = [
+  "Abul Monsur Mohammad Kachru",
+  "Md Fahim Hossain",
+  "Mohammad Azad",
+];
+
+// Helper function to emit active users to agents
+function emitActiveUsersToAgents() {
+  const activeUsers = Object.keys(users);
+  for (const agentSocketId of Object.values(agents)) {
+    io.to(agentSocketId).emit("update-user-list", activeUsers);
+  }
+}
 
 // Socket.IO connection
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
+  // Register users or agents
   socket.on("register", (username) => {
-    if (!users[username]) {
-      socket.username = username;
-      users[username] = socket;
-      socket.emit("registered", username);
-      socket.broadcast.emit(
-        "user-connected",
-        `${username} has joined the chat`
-      );
+    socket.username = username;
+    if (agentsList.includes(username)) {
+      agents[username] = socket.id;
+      emitActiveUsersToAgents(); // Update agents with active users
+    } else {
+      users[username] = socket.id;
+      io.emit("update-user-list", Object.keys(users)); // Update all clients with active users
     }
+
+    console.log("Connected Users:", users); // Debug log
+    console.log("Connected Agents:", agents); // Debug log
+
+    socket.emit("registered", username);
+    socket.broadcast.emit("user-connected", `${username} has joined the chat`);
   });
 
+  // Load chat history for the current user
   socket.on("load-messages", async () => {
     const messages = await Message.find({
       $or: [{ sender: socket.username }, { receiver: socket.username }],
@@ -71,30 +87,45 @@ io.on("connection", (socket) => {
     socket.emit("chat-history", messages);
   });
 
+  // Handle private messages
   socket.on("private-message", async ({ receiver, text }) => {
     const message = { sender: socket.username, receiver, text };
-    const receiverSocket = users[receiver];
 
-    await Message.create(message);
+    // Save message to the database
+    const newMessage = new Message(message);
+    await newMessage.save();
 
-    if (receiverSocket) {
-      receiverSocket.emit("message", message);
+    // If the receiver is "all," send to all users
+    if (receiver === "all") {
+      io.emit("message", message);
+    } else {
+      // Send to the specific receiver if online
+      const receiverSocketId = users[receiver] || agents[receiver] || null;
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("message", message);
+        console.log(`Message sent to ${receiver}:`, message); // Debug log
+      } else {
+        console.log(`Receiver ${receiver} not connected`); // Debug log
+      }
     }
-
-    socket.emit("message", { ...message, sender: "You" });
   });
 
+  // Handle disconnection
   socket.on("disconnect", () => {
-    delete users[socket.username];
-    socket.broadcast.emit(
-      "user-disconnected",
-      `${socket.username} has left the chat`
-    );
+    if (agents[socket.username]) {
+      delete agents[socket.username];
+    } else {
+      delete users[socket.username];
+    }
+
+    io.emit("update-user-list", Object.keys(users));
+    io.emit("user-disconnected", `${socket.username} has left the chat`);
+    console.log("Client disconnected:", socket.id);
   });
 });
 
 // Server listening
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
